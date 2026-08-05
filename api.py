@@ -12,16 +12,7 @@ ALLOWED_ALL_TYPES = {"ssh", "vmess", "vless", "trojan"}
 ALLOWED_XRAY_TYPES = {"vmess", "vless", "trojan"}
 API_DB_PATH = "/etc/api/.api.db"
 
-# ================================================================
-#  Helper — jalankan m_api secara async (non-blocking)
-# ================================================================
-
 async def run_m_api(*args: str):
-    """
-    Jalankan: m_api <args...>
-    Return: (returncode, stdout_text, stderr_text)
-    Berjalan async sehingga tidak memblokir request user lain.
-    """
     cmd = ["m_api", *args]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -64,29 +55,11 @@ def build_response(returncode, stdout, stderr, cmd):
                 "message":    stderr or stdout,
             }), 500
 
-
-
-
 def missing_params(**kwargs):
     """Kembalikan list nama parameter yang nilainya None."""
     return [k for k, v in kwargs.items() if v is None]
 
-
-
-
-# ================================================================
-#  Helper — validasi API key dari /etc/api/.api.db
-# ================================================================
-
 def check_api_key(incoming_key: str | None):
-    """
-    Validasi API key dari request terhadap key di /etc/api/.api.db.
-    
-    Return:
-        None          — jika key valid (lanjut proses)
-        (dict, int)   — tuple (response_body, status_code) jika gagal
-    """
-    # Cek file .api.db ada dan bisa dibaca
     try:
         with open(API_DB_PATH, "r") as f:
             parts = f.read().strip().split()
@@ -105,23 +78,12 @@ def check_api_key(incoming_key: str | None):
     if incoming_key != api_key:
         return {"status": False, "statusCode": 403, "message": "API key tidak valid."}, 403
 
-    return None  # valid
-
-# ================================================================
-#  SSH
-# ================================================================
+    return None
 
 @app.route("/ssh/create", methods=["GET"])
 async def create_ssh():
-    """
-    Buat akun SSH baru.
-
-    GET /ssh/create?api_key=abc-123-456&username=john&password=pass123&iplimit=2&masaaktif=30
-    """
-    
     incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     
-    # Validasi key — jika gagal langsung return
     err = check_api_key(incoming_key)
     if err:
         body, code = err
@@ -147,14 +109,8 @@ async def create_ssh():
 
 @app.route("/ssh/trial", methods=["GET"])
 async def trial_ssh():
-    """
-    Buat akun SSH trial sementara.
-
-    GET /ssh/trial?api_key=abc-123-456&iplimit=1&waktu=60
-    """
     incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
-    
-    # Validasi key — jika gagal langsung return
+
     err = check_api_key(incoming_key)
     if err:
         body, code = err
@@ -175,17 +131,8 @@ async def trial_ssh():
     except Exception as e:
         return jsonify({"status": False, "statusCode": 500, "message": str(e)}), 500
 
-# ================================================================
-#  XRAY (VMess / VLess / Trojan) — 2 endpoint
-# ================================================================
-
 @app.route("/create", methods=["GET"])
 async def create_xray():
-    """
-    Buat akun Xray baru (vmess / vless / trojan).
-
-    GET /create?api_key=xxx&type=vmess&username=john&quota=10&iplimit=2&masaaktif=30
-    """
     incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     err = check_api_key(incoming_key)
     if err:
@@ -220,11 +167,6 @@ async def create_xray():
 
 @app.route("/trial", methods=["GET"])
 async def trial_xray():
-    """
-    Buat akun Xray trial sementara (vmess / vless / trojan).
-
-    GET /trial?api_key=xxx&type=vmess&quota=5&iplimit=1&waktu=60
-    """
     incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     err = check_api_key(incoming_key)
     if err:
@@ -255,13 +197,9 @@ async def trial_xray():
     except Exception as e:
         return jsonify({"status": False, "statusCode": 500, "message": str(e)}), 500
 
-
-# ================================================================
-#  MEMBER ROUTE
-# ================================================================
 @app.route("/member", methods=["GET"])
 async def member():
-    incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key)
+    incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     err = check_api_key(incoming_key)
     if err:
         body, code = err
@@ -291,17 +229,8 @@ async def member():
     except Exception as e:
         return jsonify({"status": False, "statusCode": 500, "message": str(e)}), 500
 
-
-# ================================================================
-#  DELETE ROUTE
-# ================================================================
 @app.route("/delete", methods=["GET"])
 async def delete_account():
-    """
-    Hapus akun (ssh / vmess / vless / trojan).
-
-    GET /delete?api_key=xxx&type=vmess&username=john
-    """
     incoming_key = request.headers.get("X-API-Key") or request.args.get("api_key")
     err = check_api_key(incoming_key)
     if err:
@@ -327,10 +256,6 @@ async def delete_account():
         return jsonify({"status": False, "statusCode": 500, "message": "Perintah 'm_api' tidak ditemukan."}), 500
     except Exception as e:
         return jsonify({"status": False, "statusCode": 500, "message": str(e)}), 500
-
-# ================================================================
-#  Jalankan server
-# ================================================================
 
 if __name__ == "__main__":
     app.run(
