@@ -1,0 +1,811 @@
+#!/bin/bash
+
+# ================================================================
+#   sbot — All-in-one VPN Account Manager
+#   Usage:
+#     create : m_api create <type> <args...>
+#     trial  : m_api trial  <type> <args...>
+#
+#   Types & args:
+#     ssh create : <username> <password> <iplimit> <masaaktif_hari>
+#     ssh trial : <iplimit> <waktu_menit>
+#     (vmess/vless/trojan) create : <username> <quota_gb> <iplimit> <masaaktif_hari>
+#     (vmess/vless/trojan) trial : <quota_gb> <iplimit> <waktu_menit>
+#     member (ssh/vmess/vless/trojan)
+#     delete (ssh/vmess/vless/trojan) : <username>
+#
+# ================================================================
+#    Author  : XDXL STORE
+#    Telegram: t.me/xdxlreal
+#    WhatsApp: wa.me/6285935195701
+# ============================================================
+
+
+domain=$(cat /etc/xray/domain)
+ISP=$(cat /etc/xray/isp 2>/dev/null || cat /root/.isp 2>/dev/null)
+CITY=$(cat /etc/xray/city 2>/dev/null || cat /root/.city 2>/dev/null)
+dir_lim="/etc/kyt/limit"
+
+function convert() {
+    local -i bytes=$1;
+    if [[ $bytes -lt 1024 ]]; then
+        echo "${bytes}B"
+    elif [[ $bytes -lt 1048576 ]]; then
+        echo "$(( (bytes + 1023)/1024 ))KB"
+    elif [[ $bytes -lt 1073741824 ]]; then
+        echo "$(( (bytes + 1048575)/1048576 ))MB"
+    else
+        echo "$(( (bytes + 1073741823)/1073741824 ))GB"
+    fi
+}
+
+# ================================================================
+#  HELPERS — SSH
+# ================================================================
+
+function _create_ssh() (
+  user="${1}"; Pass="${2}"; iplimit="${3}"; masaaktif="${4}"
+
+  if ! [[ $user =~ ^[a-zA-Z0-9_]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak valid. Gunakan huruf, angka, atau underscore." }'
+    exit 1
+  fi
+  if id "$user" &>/dev/null; then
+    echo "{ \"status\": false, \"statusCode\": 409, \"message\": \"Username '$user' sudah terdaftar, gunakan username lain.\" }"
+    exit 1
+  fi
+  if [[ -z "$Pass" ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Password tidak boleh kosong." }'
+    exit 1
+  fi
+  if ! [[ ${masaaktif} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Limit IP dan Expired harus berupa angka." }'
+    exit 1
+  fi
+
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/ssh/ip/
+    echo "$iplimit" > ${dir_lim}/ssh/ip/$user
+  fi
+
+  useradd -e $(date -d "$masaaktif days" +"%Y-%m-%d") -s /bin/false -M $user
+  echo -e "$Pass\n$Pass\n" | passwd $user &>/dev/null
+
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+
+  DATADB=$(grep "^###" /etc/ssh/.ssh.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/ssh/.ssh.db
+  echo "### ${user} ${Pass} ${iplimit} ${exp} ${hariini}" >> /etc/ssh/.ssh.db
+
+  systemctl restart ssh
+
+  source /usr/local/style/style-all.sh ssh api
+)
+
+function _trial_ssh() (
+  iplimit="${1}"; waktu="${2}"
+
+  if ! [[ ${waktu} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Limit IP dan Waktu harus berupa angka." }'
+    exit 1
+  fi
+  if [[ $waktu -le 0 ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Waktu trial harus lebih dari 0 menit." }'
+    exit 1
+  fi
+
+  user="trial-$(</dev/urandom tr -dc 0-9 | head -c4)"
+  Pass=1; masaaktif=1
+
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/ssh/ip/
+    echo "$iplimit" > ${dir_lim}/ssh/ip/$user
+  fi
+
+  useradd -e $(date -d "$masaaktif days" +"%Y-%m-%d") -s /bin/false -M $user
+  echo -e "$Pass\n$Pass\n" | passwd $user &>/dev/null
+
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+
+  DATADB=$(grep "^###" /etc/ssh/.ssh.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/ssh/.ssh.db
+  echo "### ${user} ${Pass} ${iplimit} ${exp} ${hariini}" >> /etc/ssh/.ssh.db
+
+  echo "killusr ssh ${user}" | at now + $waktu minutes &>/dev/null
+
+  systemctl restart ssh
+
+  source /usr/local/style/style-all.sh ssh api
+)
+
+function _member_ssh() {
+  members=()
+
+  while IFS=: read -r username _ uid _ _ _ _; do
+    [[ "$username" == "nobody" || ! "$uid" =~ ^[0-9]+$ || "$uid" -lt 1000 ]] && continue
+
+    expiry=$(chage -l "$username" 2>/dev/null | awk -F": " '/Account expires/{print $2}')
+    [[ -z "$expiry" ]] && expiry="Never"
+
+    status=$(passwd -S "$username" 2>/dev/null | awk '{print $2}')
+    [[ "$status" == "L" ]] && status_val="locked" || status_val="unlocked"
+
+    members+=("{ \"username\": \"${username}\", \"expired\": \"${expiry}\", \"status\": \"${status_val}\" }")
+  done < /etc/passwd
+
+  if [[ ${#members[@]} -eq 0 ]]; then
+    echo '{ "status": true, "statusCode": 200, "message": "No existing clients.", "data": [] }'
+    return
+  fi
+
+  echo '{ "status": true, "statusCode": 200, "message": "SUCCESS", "data": ['
+  total=${#members[@]}
+  for ((i = 0; i < total; i++)); do
+    comma=","
+    [[ $((i + 1)) -eq $total ]] && comma=""
+    echo "  ${members[$i]}${comma}"
+  done
+  echo '] }'
+}
+
+function _delete_ssh() (
+  username="${1}"
+
+  if [[ -z "${username}" ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak boleh kosong." }'
+    exit 1
+  fi
+
+  if ! getent passwd "${username}" > /dev/null 2>&1; then
+    echo "{ \"status\": false, \"statusCode\": 404, \"message\": \"Username '${username}' tidak ditemukan.\" }"
+    exit 1
+  fi
+
+  exp=$(grep -w "^### ${username}" "/etc/ssh/.ssh.db" | cut -d ' ' -f 5 | sort | uniq)
+
+  userdel "${username}" > /dev/null 2>&1
+  sed -i "/^${username}:/d" /etc/group
+  grep -wE "^### ${username}" "/etc/ssh/.ssh.db" | awk '{print $1" "$2" "$3}' | sort | uniq | tail -1 >> /etc/xray/.userall.db
+  sed -i "/^### ${username}/d" /etc/ssh/.ssh.db
+  rm -f /etc/ssh/${username}
+  rm -f /etc/kyt/limit/ssh/ip/${username}
+  rm -f /var/www/html/ssh-${username}.txt
+
+  echo "{ \"status\": true, \"statusCode\": 200, \"message\": \"SUCCESS\", \"data\": { \"username\": \"${username}\", \"expired\": \"${exp}\" } }"
+)
+
+# ================================================================
+#  HELPERS — VMESS
+# ================================================================
+
+function add_vmess_user() {
+  sed -i '/#vmess$/a\### '"$user $exp"'\
+},{"id": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  sed -i '/#vmessgrpc$/a\### '"$user $exp"'\
+},{"id": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  local asu
+  asu=$(cat <<EOF
+      {
+      "v": "2",
+      "ps": "${user}",
+      "add": "${domain}",
+      "port": "443",
+      "id": "${uuid}",
+      "aid": "0",
+      "net": "ws",
+      "path": "/vmess",
+      "type": "none",
+      "host": "${domain}",
+      "tls": "tls"
+}
+EOF
+)
+  local ask
+  ask=$(cat <<EOF
+      {
+      "v": "2",
+      "ps": "${user}",
+      "add": "${domain}",
+      "port": "80",
+      "id": "${uuid}",
+      "aid": "0",
+      "net": "ws",
+      "path": "/vmess",
+      "type": "none",
+      "host": "${domain}",
+      "tls": "none"
+}
+EOF
+)
+  local grpc
+  grpc=$(cat <<EOF
+      {
+      "v": "2",
+      "ps": "${user}",
+      "add": "${domain}",
+      "port": "443",
+      "id": "${uuid}",
+      "aid": "0",
+      "net": "grpc",
+      "path": "vmess-grpc",
+      "type": "none",
+      "host": "${domain}",
+      "tls": "tls"
+}
+EOF
+)
+  vmesslink1="vmess://$(echo "$asu"  | base64 -w 0)"
+  vmesslink2="vmess://$(echo "$ask"  | base64 -w 0)"
+  vmesslink3="vmess://$(echo "$grpc" | base64 -w 0)"
+}
+
+function _create_vmess() (
+  user="${1}"; Quota="${2}"; iplimit="${3}"; masaaktif="${4}"
+
+  if ! [[ $user =~ ^[a-zA-Z0-9_]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak valid. Gunakan huruf, angka, atau underscore." }'
+    exit 1
+  fi
+  if grep -i -w -q "$user" /etc/xray/config.json; then
+    echo "{ \"status\": false, \"statusCode\": 409, \"message\": \"Username '$user' sudah terdaftar, gunakan username lain.\" }"
+    exit 1
+  fi
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${masaaktif} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Expired harus berupa angka." }'
+    exit 1
+  fi
+
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+
+  add_vmess_user
+
+  source /usr/local/style/style-all.sh format_vmess
+
+  [ ! -d /etc/vmess ] && mkdir -p /etc/vmess
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/vmess/ip
+    echo "$iplimit" > ${dir_lim}/vmess/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/vmess/$user
+
+  DATADB=$(grep "^###" /etc/vmess/.vmess.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/vmess/.vmess.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/vmess/.vmess.db
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh vmess api
+)
+
+function _trial_vmess() (
+  Quota="${1}"; iplimit="${2}"; waktu="${3}"
+
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${waktu} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Waktu harus berupa angka." }'
+    exit 1
+  fi
+  if [[ $waktu -le 0 ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Waktu trial harus lebih dari 0 menit." }'
+    exit 1
+  fi
+
+  user="trial-$(</dev/urandom tr -dc 0-9 | head -c4)"
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+  masaaktif=1
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+
+  add_vmess_user
+
+  source /usr/local/style/style-all.sh format_vmess
+
+  [ ! -d /etc/vmess ] && mkdir -p /etc/vmess
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/vmess/ip
+    echo "$iplimit" > ${dir_lim}/vmess/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/vmess/$user
+
+  DATADB=$(grep "^###" /etc/vmess/.vmess.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/vmess/.vmess.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/vmess/.vmess.db
+
+  echo "killusr vmess ${user}" | at now + $waktu minutes &>/dev/null
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh vmess api
+)
+
+function _member_vmess() (
+  if [[ "$(grep -c -E '^### ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": true, "statusCode": 200, "message": "No existing clients.", "data": [] }'
+    return
+  fi
+
+  usernames=($(grep -E "^### " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq))
+
+  echo '{ "status": true, "statusCode": 200, "message": "SUCCESS", "data": ['
+
+  total=${#usernames[@]}
+  for ((i = 0; i < total; i++)); do
+    username="${usernames[$i]}"
+    exp=$(grep -wE "^### ${username}" "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+    [[ ! -f "/etc/usr/${username}" ]] && echo "unlock" > /etc/usr/${username}
+
+    log_usage="/etc/usage_quota/vmess/${username}"
+    if [[ ! -e "$log_usage" ]]; then
+      usage_total="0"
+    else
+      usage=$(cat "$log_usage")
+      usage_total=$(convert "$usage")
+    fi
+
+    if [[ "$(cat /etc/usr/${username})" == "unlock" ]]; then
+      status_val="unlocked"
+    else
+      status_val="locked"
+    fi
+
+    comma=","
+    [[ $((i + 1)) -eq $total ]] && comma=""
+
+    printf '    { "no": %d, "username": "%s", "expired": "%s", "status": "%s", "usage": "%s" }%s\n' \
+      "$((i + 1))" "$username" "$exp" "$status_val" "$usage_total" "$comma"
+  done
+
+  echo '] }'
+)
+
+function _delete_vmess() (
+  username="${1}"
+
+  if [[ -z "${username}" ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak boleh kosong." }'
+    exit 1
+  fi
+
+  if [[ "$(grep -c -E '^### ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": false, "statusCode": 404, "message": "No existing clients." }'
+    exit 1
+  fi
+
+  found=$(grep -E "^### ${username} " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq)
+  if [[ "${found}" != "${username}" ]]; then
+    echo "{ \"status\": false, \"statusCode\": 404, \"message\": \"Username '${username}' tidak ditemukan.\" }"
+    exit 1
+  fi
+
+  exp=$(grep -E "^### ${username} " "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+  killusr vmess "${username}" 2>/dev/null
+
+  echo "{ \"status\": true, \"statusCode\": 200, \"message\": \"SUCCESS\", \"data\": { \"username\": \"${username}\", \"expired\": \"${exp}\" } }"
+)
+
+
+
+
+
+# ================================================================
+#  HELPERS — VLESS
+# ================================================================
+
+function add_vless_user() {
+  sed -i '/#vless$/a\#& '"$user $exp"'\
+},{"id": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  sed -i '/#vlessgrpc$/a\#& '"$user $exp"'\
+},{"id": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  vlesslink1="vless://${uuid}@${domain}:443/?type=ws&encryption=none&host=${domain}&path=/vless&security=tls&sni=${domain}#${user}"
+  vlesslink2="vless://${uuid}@${domain}:80/?type=ws&encryption=none&flow=&host=${domain}&path=/vless#${user}"
+  vlesslink3="vless://${uuid}@${domain}:443?mode=gun&security=tls&encryption=none&type=grpc&serviceName=vless&sni=bug.com#${user}"
+}
+
+function _create_vless() (
+  user="${1}"; Quota="${2}"; iplimit="${3}"; masaaktif="${4}"
+
+  if ! [[ $user =~ ^[a-zA-Z0-9_]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak valid. Gunakan huruf, angka, atau underscore." }'
+    exit 1
+  fi
+  if grep -i -w -q "$user" /etc/xray/config.json; then
+    echo "{ \"status\": false, \"statusCode\": 409, \"message\": \"Username '$user' sudah terdaftar, gunakan username lain.\" }"
+    exit 1
+  fi
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${masaaktif} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Expired harus berupa angka." }'
+    exit 1
+  fi
+
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+
+  add_vless_user
+
+  source /usr/local/style/style-all.sh format_vless
+
+  [ ! -d /etc/vless ] && mkdir -p /etc/vless
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/vless/ip
+    echo "$iplimit" > ${dir_lim}/vless/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/vless/$user
+
+  DATADB=$(grep "^###" /etc/vless/.vless.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/vless/.vless.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/vless/.vless.db
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh vless api
+)
+
+function _trial_vless() (
+  Quota="${1}"; iplimit="${2}"; waktu="${3}"
+
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${waktu} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Waktu harus berupa angka." }'
+    exit 1
+  fi
+  if [[ $waktu -le 0 ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Waktu trial harus lebih dari 0 menit." }'
+    exit 1
+  fi
+
+  user="trial-$(</dev/urandom tr -dc 0-9 | head -c4)"
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+  masaaktif=1
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+
+  add_vless_user
+
+  source /usr/local/style/style-all.sh format_vless
+
+  [ ! -d /etc/vless ] && mkdir -p /etc/vless
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/vless/ip
+    echo "$iplimit" > ${dir_lim}/vless/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/vless/$user
+
+  DATADB=$(grep "^###" /etc/vless/.vless.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/vless/.vless.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/vless/.vless.db
+
+  echo "killusr vless ${user}" | at now + $waktu minutes &>/dev/null
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh vless api
+)
+
+function _member_vless() {
+  if [[ "$(grep -c -E '^#& ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": true, "statusCode": 200, "message": "No existing clients.", "data": [] }'
+    return
+  fi
+
+  usernames=($(grep -E "^#& " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq))
+
+  echo '{ "status": true, "statusCode": 200, "message": "SUCCESS", "data": ['
+
+  total=${#usernames[@]}
+  for ((i = 0; i < total; i++)); do
+    username="${usernames[$i]}"
+    exp=$(grep -wE "^#& ${username}" "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+    [[ ! -f "/etc/usr/${username}" ]] && echo "unlock" > /etc/usr/${username}
+
+    log_usage="/etc/usage_quota/vless/${username}"
+    if [[ ! -e "$log_usage" ]]; then
+      usage_total="0"
+    else
+      usage=$(cat "$log_usage")
+      usage_total=$(convert "$usage")
+    fi
+
+    if [[ "$(cat /etc/usr/${username})" == "unlock" ]]; then
+      status_val="unlocked"
+    else
+      status_val="locked"
+    fi
+
+    comma=","
+    [[ $((i + 1)) -eq $total ]] && comma=""
+
+    printf '    { "no": %d, "username": "%s", "expired": "%s", "status": "%s", "usage": "%s" }%s\n' \
+      "$((i + 1))" "$username" "$exp" "$status_val" "$usage_total" "$comma"
+  done
+
+  echo '] }'
+}
+
+function _delete_vless() (
+  username="${1}"
+
+  if [[ -z "${username}" ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak boleh kosong." }'
+    exit 1
+  fi
+
+  if [[ "$(grep -c -E '^#& ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": false, "statusCode": 404, "message": "No existing clients." }'
+    exit 1
+  fi
+
+  found=$(grep -E "^#& ${username} " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq)
+  if [[ "${found}" != "${username}" ]]; then
+    echo "{ \"status\": false, \"statusCode\": 404, \"message\": \"Username '${username}' tidak ditemukan.\" }"
+    exit 1
+  fi
+
+  exp=$(grep -E "^#& ${username} " "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+  killusr vless "${username}" 2>/dev/null
+
+  echo "{ \"status\": true, \"statusCode\": 200, \"message\": \"SUCCESS\", \"data\": { \"username\": \"${username}\", \"expired\": \"${exp}\" } }"
+)
+
+# ================================================================
+#  HELPERS — TROJAN
+# ================================================================
+
+function add_trojan_user() {
+  sed -i '/#trojanws$/a\#! '"$user $exp"'\
+},{"password": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  sed -i '/#trojangrpc$/a\#! '"$user $exp"'\
+},{"password": "'""$uuid""'","alterId": '"0"',"email": "'""$user""'"' /etc/xray/config.json
+
+  trojanlink1="trojan://${uuid}@${domain}:443?path=/trojan&security=tls&host=${domain}&type=ws&sni=${domain}#${user}"
+  trojanlink2="trojan://${uuid}@${domain}:80?path=/trojan&security=tls&host=${domain}&type=ws#${user}"
+  trojanlink3="trojan://${uuid}@${domain}:443?mode=gun&security=tls&type=grpc&serviceName=trojan&sni=bug.com#${user}"
+}
+
+function _create_trojan() (
+  user="${1}"; Quota="${2}"; iplimit="${3}"; masaaktif="${4}"
+
+  if ! [[ $user =~ ^[a-zA-Z0-9_]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak valid. Gunakan huruf, angka, atau underscore." }'
+    exit 1
+  fi
+  if grep -i -w -q "$user" /etc/xray/config.json; then
+    echo "{ \"status\": false, \"statusCode\": 409, \"message\": \"Username '$user' sudah terdaftar, gunakan username lain.\" }"
+    exit 1
+  fi
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${masaaktif} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Expired harus berupa angka." }'
+    exit 1
+  fi
+
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+
+  add_trojan_user
+
+  source /usr/local/style/style-all.sh format_trojan
+
+  [ ! -d /etc/trojan ] && mkdir -p /etc/trojan
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/trojan/ip
+    echo "$iplimit" > ${dir_lim}/trojan/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/trojan/$user
+
+  DATADB=$(grep "^###" /etc/trojan/.trojan.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/trojan/.trojan.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/trojan/.trojan.db
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh trojan api
+)
+
+function _trial_trojan() (
+  Quota="${1}"; iplimit="${2}"; waktu="${3}"
+
+  if ! [[ ${Quota} =~ ^[0-9]+$ && ${waktu} =~ ^[0-9]+$ && ${iplimit} =~ ^[0-9]+$ ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Quota, Limit IP, dan Waktu harus berupa angka." }'
+    exit 1
+  fi
+  if [[ $waktu -le 0 ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Waktu trial harus lebih dari 0 menit." }'
+    exit 1
+  fi
+
+  user="trial-$(</dev/urandom tr -dc 0-9 | head -c4)"
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+  masaaktif=1
+  exp=$(date -d "$masaaktif days" +"%Y-%m-%d")
+  hariini=$(date -d "0 days" +"%Y-%m-%d")
+
+  add_trojan_user
+
+  source /usr/local/style/style-all.sh format_trojan
+
+  [ ! -d /etc/trojan ] && mkdir -p /etc/trojan
+  if [[ $iplimit -gt 0 ]]; then
+    mkdir -p ${dir_lim}/trojan/ip
+    echo "$iplimit" > ${dir_lim}/trojan/ip/$user
+  fi
+
+  [ -z "$Quota" ] && Quota="0"
+  quotausr=$(echo "$Quota" | sed 's/[^0-9]*//g')
+  d=$(( quotausr * 1024 * 1024 * 1024 ))
+  [[ $quotausr != "0" ]] && echo "$d" > /etc/trojan/$user
+
+  DATADB=$(grep "^###" /etc/trojan/.trojan.db 2>/dev/null | grep -w "$user" | awk '{print $2}')
+  [[ "$DATADB" != '' ]] && sed -i "/\b${user}\b/d" /etc/trojan/.trojan.db
+  echo "### ${user} ${exp} ${uuid} ${Quota} ${iplimit}" >> /etc/trojan/.trojan.db
+
+  echo "killusr trojan ${user}" | at now + $waktu minutes &>/dev/null
+
+  systemctl restart xray
+
+  source /usr/local/style/style-all.sh trojan api
+)
+
+function _member_trojan() {
+  if [[ "$(grep -c -E '^#! ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": true, "statusCode": 200, "message": "No existing clients.", "data": [] }'
+    return
+  fi
+
+  usernames=($(grep -E "^#! " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq))
+
+  echo '{ "status": true, "statusCode": 200, "message": "SUCCESS", "data": ['
+
+  total=${#usernames[@]}
+  for ((i = 0; i < total; i++)); do
+    username="${usernames[$i]}"
+    exp=$(grep -wE "^#! ${username}" "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+    [[ ! -f "/etc/usr/${username}" ]] && echo "unlock" > /etc/usr/${username}
+
+    log_usage="/etc/usage_quota/trojan/${username}"
+    if [[ ! -e "$log_usage" ]]; then
+      usage_total="0"
+    else
+      usage=$(cat "$log_usage")
+      usage_total=$(convert "$usage")
+    fi
+
+    if [[ "$(cat /etc/usr/${username})" == "unlock" ]]; then
+      status_val="unlocked"
+    else
+      status_val="locked"
+    fi
+
+    comma=","
+    [[ $((i + 1)) -eq $total ]] && comma=""
+
+    printf '    { "no": %d, "username": "%s", "expired": "%s", "status": "%s", "usage": "%s" }%s\n' \
+      "$((i + 1))" "$username" "$exp" "$status_val" "$usage_total" "$comma"
+  done
+
+  echo '] }'
+}
+
+function _delete_trojan() (
+  username="${1}"
+
+  if [[ -z "${username}" ]]; then
+    echo '{ "status": false, "statusCode": 400, "message": "Username tidak boleh kosong." }'
+    exit 1
+  fi
+
+  if [[ "$(grep -c -E '^#! ' '/etc/xray/config.json')" == '0' ]]; then
+    echo '{ "status": false, "statusCode": 404, "message": "No existing clients." }'
+    exit 1
+  fi
+
+  found=$(grep -E "^#! ${username} " "/etc/xray/config.json" | cut -d ' ' -f 2 | sort | uniq)
+  if [[ "${found}" != "${username}" ]]; then
+    echo "{ \"status\": false, \"statusCode\": 404, \"message\": \"Username '${username}' tidak ditemukan.\" }"
+    exit 1
+  fi
+
+  exp=$(grep -E "^#! ${username} " "/etc/xray/config.json" | cut -d ' ' -f 3 | sort | uniq)
+
+  killusr trojan "${username}" 2>/dev/null
+
+  echo "{ \"status\": true, \"statusCode\": 200, \"message\": \"SUCCESS\", \"data\": { \"username\": \"${username}\", \"expired\": \"${exp}\" } }"
+)
+
+# ================================================================
+#  ROUTER UTAMA
+#  $1 = action  (create | trial | member | delete)
+#  $2 = type    (ssh | vmess | vless | trojan)
+#  $3... = args
+# ================================================================
+
+ACTION="${1}"
+TYPE="${2}"
+
+function _usage() {
+  cat <<EOF
+{ "status": false, "statusCode": 400, "message": "Usage: m_api <create|trial|member|delete> <ssh|vmess|vless|trojan> [args...]" }
+EOF
+  exit 1
+}
+
+function _usage_type() {
+  cat <<EOF
+{ "status": false, "statusCode": 400, "message": "Tipe tidak dikenal: '$TYPE'. Gunakan: ssh, vmess, vless, trojan." }
+EOF
+  exit 1
+}
+
+case "$ACTION" in
+  create) case "$TYPE" in
+      ssh) _create_ssh "${3}" "${4}" "${5}" "${6}" ;;
+      vmess) _create_vmess "${3}" "${4}" "${5}" "${6}" ;;
+      vless) _create_vless "${3}" "${4}" "${5}" "${6}" ;;
+      trojan) _create_trojan "${3}" "${4}" "${5}" "${6}" ;;
+      *) _usage_type ;;
+    esac
+    ;;
+  trial)
+    case "$TYPE" in
+      ssh)    _trial_ssh    "${3}" "${4}" ;;
+      vmess)  _trial_vmess  "${3}" "${4}" "${5}" ;;
+      vless)  _trial_vless  "${3}" "${4}" "${5}" ;;
+      trojan) _trial_trojan "${3}" "${4}" "${5}" ;;
+      *)      _usage_type ;;
+    esac
+    ;;
+
+  member)
+    case "$TYPE" in
+      ssh)    _member_ssh ;;
+      vmess)  _member_vmess ;;
+      vless)  _member_vless ;;
+      trojan) _member_trojan ;;
+      *)      _usage_type ;;
+    esac
+    ;;
+
+  delete)
+    case "$TYPE" in
+      ssh)    _delete_ssh    "${3}" ;;
+      vmess)  _delete_vmess  "${3}" ;;
+      vless)  _delete_vless  "${3}" ;;
+      trojan) _delete_trojan "${3}" ;;
+      *)      _usage_type ;;
+    esac
+    ;;
+
+  *) _usage ;;
+esac
