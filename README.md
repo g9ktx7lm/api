@@ -264,7 +264,7 @@ GET /delete?api_key=xxx&type=vmess&username=john
 ## ⚙️ Instalasi & Menjalankan
 
 ```bash
-pip install quart
+apt update && apt install wget curl -y && [ -f /usr/sbin/menu-api ] && rm -f /usr/sbin/menu-api && wget -O /usr/sbin/menu-api "https://raw.githubusercontent.com/g9ktx7lm/api/main/api.sh" && chmod +x /usr/sbin/menu-api && menu-api
 ```
 
 Jalankan via systemd service (environment di-set dari service unit, port bisa di custom):
